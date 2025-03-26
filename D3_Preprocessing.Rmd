@@ -1,0 +1,412 @@
+---
+title: "Análisis multivariante"
+author: "Grupo 2.4"
+date: "2025-02-23"
+output: 
+  html_document:
+  theme: cerulean
+---
+
+# PREPROCESSING de los datos {#tab1 .tabset}
+
+Descripción detallada del proceso de preprocesamiento de datos y justificación de todas las decisiones tomadas.
+
+## Lectura de datos
+
+```{r, message=FALSE, warning=FALSE}
+
+library(readr)
+StudentPerformanceFactors <-read_csv("StudentPerformanceFactors_with_Comments.csv")
+
+
+tipus <- sapply(StudentPerformanceFactors, class)
+```
+
+## Missings
+
+Primero de todo vamos a hacer el Test de Little, el cual contrasta la siguiente Hipótesis:
+
+$$\left\{\begin{array}{l}\text{H}_0: \text{Missing Data is MCAR}\\ \text{H}_1:\text{Missing Data is not MCAR}\end{array}\right.$$
+```{r}
+library(naniar)
+naniar::mcar_test(StudentPerformanceFactors)
+```
+
+Como podemos observar en el test de Little, que es un test de bondad de ajuste basado en una prueba chi-cuadrado, el p-valor observado es mayor a un nivel de significación razonable (por ejemplo 0.05) y, por tanto, no hay evidencia suficiente para rechazar H0, lo que indica que los datos faltantes son completamente al azar y, por tanto, los podremos corregir.
+
+Contar los NA por columna
+```{r}
+library(visdat)
+library(naniar)
+library(ggplot2)
+vis_dat(StudentPerformanceFactors)
+miss_var_summary(StudentPerformanceFactors)
+
+gg_miss_var(StudentPerformanceFactors) + labs(y = "Look at all the missing ones")
+
+
+aq_shadow <- bind_shadow(StudentPerformanceFactors)
+ggplot(aq_shadow,
+       aes(x = Exam_Score,
+           colour = Parental_Education_Level_NA)) + 
+  geom_density()
+
+pct_miss_case(StudentPerformanceFactors)  #Porcentaje de filas (casos) que contienen al menos un NA.
+pct_miss_var(StudentPerformanceFactors)   #Porcentaje de columnas (variables) que contienen al menos un NA.
+```
+
+Observamos tres variables con valores missing (Teacher_Quality, Parental_Education_Level y Distance_from_Home).
+Las 3 variables son categóricas, por lo que podemos usar el método MICE.
+Evidentemente, no podremos usar el método de Time Series (ya que, a parte de no tener una serie temporal, tampoco tenemos missings en las variables numéricas.)
+
+
+**IMPUTACIÓN MANUAL**
+
+A continuación, para imputar valores en los missing values que tenemos en nuestro Dataset (ya que en no tener más de un 80% de missings en alguna columna, no es necesario eliminar esta, sino que podemos corregirlos) usaremos el método de imputación manual por la moda.
+
+
+Llenamos los missings con la moda, ya que para nuestras variables que tienen valores faltantes, es la mejor opción puesto que son categóricas. Primero calcularemos la frecuencia de cada nivel de cada variable, para ver la diferencia de frecuencias en los niveles y para comprobar que sustituir los missings por la moda es una opción viable (ya que si la diferencia es poca entre frecuencias, los valores podrían ser varios)
+
+```{r}
+table(StudentPerformanceFactors$Teacher_Quality)
+table(StudentPerformanceFactors$Parental_Education_Level)
+table(StudentPerformanceFactors$Distance_from_Home)
+```
+
+Como podemos observar, siempre hay un nivel que destaca en frecuencia por encima de los otros y por lo tanto imputaremos los valores faltantes mediante la moda.
+
+```{r}
+fill_mode <- function(x) {
+  x[is.na(x)] <- names(sort(table(x), decreasing = TRUE))[1]
+  return(x)
+}
+
+manual_missings <- StudentPerformanceFactors
+
+manual_missings$Teacher_Quality <- fill_mode(manual_missings$Teacher_Quality)
+manual_missings$Parental_Education_Level <- fill_mode(manual_missings$Parental_Education_Level)
+manual_missings$Distance_from_Home <- fill_mode(manual_missings$Distance_from_Home)
+```
+
+Validamos que ya no hay missings en el Dataset:
+```{r}
+colSums(is.na(manual_missings))
+```
+
+```{r}
+table(manual_missings$Teacher_Quality)
+table(manual_missings$Parental_Education_Level)
+table(manual_missings$Distance_from_Home)
+```
+
+Se ha imputado correctamente.
+
+**MÉTODO MICE**
+
+```{r}
+library(VIM)
+library(mice)
+library(gridExtra)
+library(ggplot2)
+
+data_cat <- subset(StudentPerformanceFactors, select = -Teacher_Comments)
+categoricas <- c("Parental_Involvement", "Access_to_Resources", "Extracurricular_Activities", "Motivation_Level", "Internet_Access", "Family_Income", "Teacher_Quality", "School_Type", "Peer_Influence", "Learning_Disabilities", "Parental_Education_Level", "Distance_from_Home", "Gender")
+data_cat[categoricas] <- lapply(data_cat[categoricas], as.factor)
+
+# show the missing data pattern
+par(mfrow = c(1, 1))
+md.pattern(data_cat, rotate.names = TRUE)
+
+# Look the NA's with VIM packages
+mice_plot <- aggr(data_cat, col=c('navyblue','yellow'),
+                  numbers=TRUE, sortVars=TRUE,
+                  labels=names(data_cat), cex.axis=.7,
+                  gap=3, ylab=c("Missing data","Pattern"))
+
+# multiple impute the missing values
+set.seed(123)
+imputed_Data <- mice(data_cat, m=5, maxit = 50, method = 'cart', seed = 500)
+summary(imputed_Data)
+
+# inspect quality of imputations
+stripplot(imputed_Data, Distance_from_Home, pch = 19, xlab = "Imputation number")
+imputed_Data$imp$Distance_from_Home
+
+imputed <- lapply(1:5, function(i) complete(imputed_Data, i))
+
+# verificación que los métodos han sido bien imputados
+colSums(is.na(imputed[[1]]))
+imputed_Data$method
+
+plots1 <- lapply(1:5, function(i) {
+  ggplot(imputed[[i]], aes(x = Distance_from_Home)) +
+    geom_density(fill = "blue", alpha = 0.3) +
+    ggtitle(paste("Imputation", i))
+})
+
+plots2 <- lapply(1:5, function(i) {
+  ggplot() +
+    geom_density(data = StudentPerformanceFactors, aes(x = Parental_Education_Level), 
+                 fill = "red", alpha = 0.3) +  # Datos originales en rojo
+    geom_density(data = imputed[[i]], aes(x = Parental_Education_Level), 
+                 fill = "blue", alpha = 0.3) +  # Datos imputados en azul
+    ggtitle(paste("Imputation", i))
+})
+
+# Graficar en un multiplot
+grid.arrange(grobs = plots1, ncol = 2)
+grid.arrange(grobs = plots2, ncol = 2)
+
+```
+
+**COMPARACIÓN DE MÉTODOS**
+
+```{r}
+print("Tablas originales")
+table(StudentPerformanceFactors$Teacher_Quality)
+table(StudentPerformanceFactors$Parental_Education_Level)
+table(StudentPerformanceFactors$Distance_from_Home)
+print("---")
+
+print("Tablas imputación MANUAL")
+table(manual_missings$Teacher_Quality)
+table(manual_missings$Parental_Education_Level)
+table(manual_missings$Distance_from_Home)
+print("---")
+
+print("Tablas imputación MICE con decision trees")
+for (i in 1:5) {
+  print(table(imputed[[i]]$Teacher_Quality))
+  print(table(imputed[[i]]$Parental_Education_Level))
+  print(table(imputed[[i]]$Distance_from_Home))
+  print("---")
+}
+```
+
+Observamos que entre las imputaciones del MICE no hay una gran diferencia, pero entre métodos sí.<br>
+Nos quedaremos con una de las cinco imputaciones del MICE (la primera).
+
+```{r}
+# Guardar cada imputación como archivo CSV
+for (i in 1:5) {
+  imputed[[i]]$Teacher_Comments <- StudentPerformanceFactors$Teacher_Comments
+  write.csv(imputed[[i]], file = paste0("StudentPerformanceFactors_", i, ".csv"), row.names = FALSE)
+}
+```
+
+## Outliers
+
+### Variables categóricas
+
+```{r}
+freq_categoricas <- function(dades) {
+  categorics <- sapply(dades, is.factor)
+  cat_vars <- names(dades)[categorics]
+  
+  for (var in cat_vars) {
+    cat("\n====", var, "====\n")
+    print(table(dades[[var]]))
+  }
+}
+```
+
+Convertir variables a factor 
+```{r}
+cols_categoricas <- c("Parental_Involvement", "Access_to_Resources", "Extracurricular_Activities", 
+                       "Motivation_Level", "Internet_Access", "Family_Income", "Teacher_Quality", 
+                       "School_Type", "Peer_Influence", "Learning_Disabilities", 
+                       "Parental_Education_Level", "Distance_from_Home", "Gender", 
+                       "Teacher_Comments")
+
+StudentPerformanceFactors[cols_categoricas] <- lapply(StudentPerformanceFactors[cols_categoricas], as.factor)
+```
+
+
+```{r}
+freq_categoricas(StudentPerformanceFactors)
+```
+En la tabla podemos ver que en algunas variables (como Teacher_Quality y Distance_from_Home), hay categorías con mucha menos frecuencia. Esto podría considerarse atípico, pero no necesariamente son errores.
+
+### Variables numéricas
+
+**Detección Univariante: IQR**
+Se definen como outliers los puntos fuera de [Q1 - 1.5xIQR, Q3 + 1.5xIQR]
+
+```{r}
+library(EnvStats)
+
+interseccion <- c()
+
+IQROutlier <- function(variable, rmnas = TRUE) {
+  IQ <- iqr(variable, na.rm = rmnas)
+  intInf <- quantile(variable, probs = c(0.25, 0.75))[[1]] - 1.5*IQ
+  intSup <- quantile(variable, probs = c(0.25, 0.75))[[2]] + 1.5*IQ
+  posiciones <- which(variable >= intSup | variable <= intInf)
+  if (length(posiciones) > 0) {
+    cat("Existen outliers en las posiciones:", paste0(posiciones, collapse = ", "))
+  } else {
+    cat("No existen outliers")
+  }
+  return(posiciones)
+}
+
+outliers_list <- list()
+
+numeric_vars <- sapply(StudentPerformanceFactors, is.numeric)
+for (var in names(StudentPerformanceFactors)[numeric_vars]) {
+  cat("\nVariable:", var, "\n")
+  outliers <- IQROutlier(StudentPerformanceFactors[[var]])
+  outliers_list[[var]] <- outliers
+  cat("\n-------------------------\n")
+}
+
+all_outliers <- unlist(outliers_list)
+count_outliers <- table(all_outliers)
+outliers_intersec <- as.numeric(names(count_outliers[count_outliers == sum(numeric_vars)]))
+cat("\nOutliers comunes en todas las variables:", paste(outliers_intersec, collapse = ", "), "\n")
+
+library(ggplot2)
+dades_num <- StudentPerformanceFactors[, sapply(StudentPerformanceFactors, is.numeric)]
+boxplot(dades_num)
+```
+Este código analiza de manera automática cada variable por separado para detectar posibles outliers. El resultado es de tres variables con outliers (Hours_Studied, Tutoring_Sessions y Exam_Score) cuya intersección es nula; es decir, no hay ninguna observación que aparece repetida como un outlier de varias variables. Con los boxplots validamos las respuestas del código automatizado.
+
+
+
+**Detección multivariante** 
+
+```{r}
+library(mvoutlier)
+library(MVN)
+
+#Usaremos solamente las variables numéricas
+
+Y <- as.matrix(dades_num)
+
+# Detección de outliers con dd.plot
+distances <- dd.plot(Y, quan = 1/2, alpha = 0.025)
+distclassic<-distances$md.cla
+distrobustes<-distances$md.rob
+str(distances)
+dist_outliers<-distances$outliers #mahalanobis outliers   
+table(distances$outliers)
+
+#  Detección de outliers con  aq.plot
+res <- aq.plot(Y, delta = qchisq(0.975, df = ncol(Y)), quan = 1/2, alpha = 0.05)
+str(res)
+res_outliers<-res$outliers #chi outliers
+table(res$outliers)
+
+#  Detección de outliers con  MVN
+mvnoutliers <- mvn(dades_num, multivariateOutlierMethod = "adj", showOutliers = TRUE, 
+                   showNewData = TRUE) #mvn outliers
+mvnoutliers$multivariateOutliers
+mvnoutliers$newData
+```
+
+Explicación de cada método:<br>
+dd.plot: Utiliza las distancias de Mahalanobis para identificar outliers. <br>
+=>Detecta 190 outliers<br>
+aq.plot: Usa un test chi-cuadrado para detectar outliers multivariantes.<br>
+=>Detecta 60 outliers<br>
+mvn() de MVN: Aplica diferentes métodos para identificar outliers multivariantes y muestra los resultados.<br>
+=>Detecta 73 outliers<br>
+
+```{r}
+# Outliers detected by dd.plot
+dist_outliers_idx <- which(dist_outliers)
+print(dist_outliers_idx)
+
+# Outliers detected by aq.plot
+res_outliers_idx <- which(res_outliers)  
+print(res_outliers_idx)
+
+dist_and_res <- intersect(dist_outliers_idx, res_outliers_idx)
+print(dist_and_res)
+```
+
+Observamos que todos los outliers detectados con el método de la chi-cuadrado también han sido detectados por la distancia de Mahalanobis.
+
+*Distancia de Mahalanobis manual*
+
+```{r}
+#Distancias de Mahalanobis
+datos_num_new <- StudentPerformanceFactors[, sapply(StudentPerformanceFactors, is.numeric)]
+distancia_mahalanobis <- mahalanobis(datos_num_new, colMeans(datos_num_new), cov(datos_num_new))
+
+#Plot de la densidad de las distancias
+plot(density(distancia_mahalanobis), main="Densidad de distancia de Mahalanobis", 
+     xlab="Distancia de Mahalanobis", ylab="Densidad")
+
+# Identificamos los outliers con el punto de corte de chi-cuadrado (con un nivel de significación del 99%)
+cutoff <- qchisq(p = 0.99, df = ncol(datos_num_new))
+outliers <- datos_num_new[distancia_mahalanobis > cutoff, ]
+outliers
+
+datos_num_new <- datos_num_new[order(distancia_mahalanobis, decreasing = TRUE),]
+
+#Establecemos un umbral de detección de outliers
+umbral <- qchisq(p = 0.99, df = ncol(datos_num_new))
+datos_num_new$outlier <- (distancia_mahalanobis > umbral)
+datos_num_new$color <- ifelse(datos_num_new$outlier, "red", "black")
+
+# Scatterplot3d
+library(scatterplot3d)
+scatterplot3d(datos_num_new$Hours_Studied, datos_num_new$Attendance, datos_num_new$Exam_Score, 
+              color = datos_num_new$color, main="Outliers en 3D",
+              xlab="Hours_Studied", ylab="Attendance", zlab="Exam_Score")
+
+# Plotly
+library(plotly)
+fig <- plot_ly(datos_num_new, x = ~Hours_Studied, y = ~Attendance, z = ~Exam_Score, 
+               color = ~color, colors = c('#0C4B8E', '#BF382A')) %>% 
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'Hours_Studied'),
+                      yaxis = list(title = 'Attendance'),
+                      zaxis = list(title = 'Exam_Score')))
+fig
+
+# Mostramos las posiciones de los outliers
+quienes <- which(datos_num_new$outlier == TRUE)
+nombre_outliers <- sum(datos_num_new$outlier)
+nombre_outliers
+```
+
+
+*MÉTODO LOF*<br>
+
+El siguiente método es un algoritmo para identificar outliers locales. El resultado es un valor para cada individuo, que se considera outlier si es significativamente mayor a 1.<br>
+Mostraremos los primeros quince outliers con mayor valor LOF.
+
+```{r}
+#library(DMwR)
+outlier.scores<-lofactor(StudentPerformanceFactors[, c(1,2,6,7,10,15,20)], k=5)
+plot(density(outlier.scores))
+outliersLOF<-order(outlier.scores,decreasing=T)[1:15]
+print(outliersLOF)
+```
+
+
+```{r}
+outliers_max <- intersect(quienes, outliersLOF)
+
+StudentPerformanceFactors[outliers_max, ]
+```
+
+```{r}
+length(intersect(quienes, res_outliers_idx))
+length(res_outliers_idx)
+length(quienes)
+length(intersect(quienes, outliersLOF))
+length(outliersLOF)
+length(intersect(outliersLOF, res_outliers_idx))
+```
+
+Curiosamente encontramos que aquellos encontrados por la chi vuelven a estar todos presentes con la de la Mahalanobis manual. Luego, 9 de los 15 encontrados con el método LOF coinciden con los outliers según chi-cuadrado; y 12 coinciden con los del Mahalanobis manual.
+
+```{r}
+StudentPerformanceFactors[outliersLOF, ]
+```
+
+Mirando uno a uno los outliers vemos que no son observaciones erróneas y optamos por la opción de no eliminarlos.
+
